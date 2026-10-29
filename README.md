@@ -40,6 +40,7 @@ helm/sample-nodejs/
     ├── deployment.yaml         # the app (Deployment)
     ├── service.yaml            # ClusterIP Service
     ├── ingress.yaml            # Traefik Ingress, public paths only
+    ├── middleware.yaml         # Traefik Middleware: strip X-Powered-By/Server, add security headers
     ├── configmap.yaml          # non-secret config -> env vars
     ├── secret.yaml             # optional secret config -> env vars
     ├── serviceaccount.yaml     # dedicated SA, no API token
@@ -125,6 +126,7 @@ config:
 | `seccompProfile: RuntimeDefault` | Blocks dangerous syscalls |
 | Dedicated ServiceAccount, `automountServiceAccountToken: false` | The app never calls the Kubernetes API, so no token is mounted for an attacker to steal |
 | Ingress routes only public paths | `/classified` and `/metrics` aren't reachable from the internet |
+| Traefik security-headers Middleware | Strips `X-Powered-By` / `Server` (stack disclosure, SonarQube `javascript:S5689`) and adds `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, all at the ingress with no app code change |
 | Optional NetworkPolicy | Only the ingress controller's namespace (`kube-system`) can reach the pods |
 
 ### Availability and graceful shutdown
@@ -132,7 +134,7 @@ config:
 - **`replicaCount: 2` and topology spread across nodes** (`maxSkew: 1`, soft): losing a node doesn't take the app down.
 - **PodDisruptionBudget `minAvailable: 1`:** node drains and upgrades evict pods one at a time.
 - **`preStop` sleep (5s):** Traefik and the endpoints controller stop routing to the pod *before* it exits, so in-flight requests aren't dropped.
-- **Graceful shutdown in `app.js`:** Node.js has no default SIGTERM handler, and as **PID 1** the kernel ignores signals that have no handler, so pods would hang until SIGKILL at the end of the grace period. `app.js` handles SIGTERM itself: it stops accepting connections, finishes in-flight requests, then exits, with a 10s safety net. The CI smoke test checks the container stops in under 5 seconds. (`shareProcessNamespace` stays in the chart as an option for images that can't handle signals, and defaults to `false`.)
+- **`shareProcessNamespace: true`:** Node.js has no default SIGTERM handler, and as **PID 1** the kernel ignores signals that have no handler, so pods would hang until SIGKILL at the end of the grace period. With a shared process namespace, the pause container is PID 1, and node gets SIGTERM's default action (exit) right away. This is fixed at the platform level, with no application code change. The CI smoke test does the same with `docker run --init` and checks the container stops in under 5 seconds.
 - **`revisionHistoryLimit: 5`:** enough ReplicaSets kept for quick rollbacks.
 
 ### Autoscaling (optional)
