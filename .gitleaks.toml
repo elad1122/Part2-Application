@@ -8,3 +8,10 @@ targetRules = ["generic-api-key"]
 regexTarget = "line"
 regexes = ['''^sonar\.(projectKey|projectName|organization)=''']
 paths = ['''^sonar-project\.properties$''']
+
+[[allowlists]]
+description = """One past commit wrote SonarQube's documented factory default (admin/admin) for the
+throwaway CI container literally; it is rotated to a random password at startup. The script no
+longer contains it. Scoped to that single commit and rule, so new occurrences are still caught."""
+targetRules = ["curl-auth-user"]
+commits = ["51608e03863660b5bd9f52fabe8912122d6821e4"]
