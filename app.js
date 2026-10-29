@@ -2,6 +2,8 @@ const express = require('express');
 const promClient = require('prom-client');
 
 const app = express();
+// Don't advertise the framework (X-Powered-By: Express) – found by SonarQube (javascript:S5689)
+app.disable('x-powered-by');
 const port = process.env.PORT || 8080;
 
 // Create a Registry to register the metrics
