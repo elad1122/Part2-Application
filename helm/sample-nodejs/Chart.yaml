@@ -3,7 +3,7 @@ name: sample-nodejs
 description: Helm chart for the sample Node.js (Express) app – stateless web service with Prometheus metrics
 type: application
 # Chart version: bump on every chart change (SemVer)
-version: 0.1.0
+version: 1.0.0
 # App version: default image tag (matches package.json "version")
 appVersion: "1.0.0"
 keywords: [nodejs, express, prometheus]
