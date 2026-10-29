@@ -5,9 +5,15 @@ metadata:
   name: {{ include "sample-nodejs.fullname" . }}
   labels:
     {{- include "sample-nodejs.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- if or .Values.ingress.annotations .Values.ingress.securityHeaders.enabled }}
   annotations:
+    {{- if .Values.ingress.securityHeaders.enabled }}
+    # Attach the security-headers Middleware (Traefik CRD reference: <namespace>-<name>@kubernetescrd)
+    traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-%s-security-headers@kubernetescrd" .Release.Namespace (include "sample-nodejs.fullname" .) }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
+    {{- end }}
   {{- end }}
 spec:
   {{- with .Values.ingress.className }}

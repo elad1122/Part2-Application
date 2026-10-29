@@ -22,5 +22,6 @@ COPY package.json app.js ./
 # Explicit non-root user (uid 65532, provided by the :nonroot image)
 USER nonroot
 EXPOSE 8080
-# Distroless entrypoint is the node binary; the app handles SIGTERM itself (see app.js)
+# Distroless entrypoint is the node binary. Node has no SIGTERM handler, so run it behind an
+# init as PID 1: `docker run --init`, or shareProcessNamespace in Kubernetes (the Helm chart)
 CMD ["app.js"]

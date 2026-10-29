@@ -257,7 +257,9 @@ jobs:
 
       - name: Smoke test (hardened runtime, probes, graceful shutdown)
         run: |
-          docker run -d --name smoke --read-only --cap-drop ALL \
+          # --init: a tiny init is PID 1 (like shareProcessNamespace in the Helm chart), so node,
+          # which has no SIGTERM handler, still exits promptly on SIGTERM
+          docker run -d --init --name smoke --read-only --cap-drop ALL \
             --security-opt no-new-privileges -p 8080:8080 "$LOCAL_TAG"
           for i in $(seq 1 30); do curl -sf localhost:8080/ready && break; sleep 1; done
           echo; curl -fsS localhost:8080/live; echo

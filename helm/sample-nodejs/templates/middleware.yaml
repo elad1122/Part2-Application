@@ -1,0 +1,21 @@
+{{- if and .Values.ingress.enabled .Values.ingress.securityHeaders.enabled }}
+# Traefik middleware applied to the app's Ingress: removes headers that disclose the server
+# stack (Express sends "X-Powered-By: Express") and adds standard security response headers.
+# This mitigates SonarQube finding javascript:S5689 at the edge without changing app code.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "sample-nodejs.fullname" . }}-security-headers
+  labels:
+    {{- include "sample-nodejs.labels" . | nindent 4 }}
+spec:
+  headers:
+    customResponseHeaders:
+      # An empty value tells Traefik to delete the header from the response
+      {{- range .Values.ingress.securityHeaders.removeResponseHeaders }}
+      {{ . }}: ""
+      {{- end }}
+    contentTypeNosniff: true
+    frameDeny: true
+    referrerPolicy: no-referrer
+{{- end }}

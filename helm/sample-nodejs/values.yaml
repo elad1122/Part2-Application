@@ -62,9 +62,11 @@ securityContext:
   capabilities:
     drop: [ALL]
 
-# Not needed: app.js handles SIGTERM itself (graceful shutdown). Only enable for images whose
-# process ignores SIGTERM as PID 1 – it makes the pause container PID 1 instead.
-shareProcessNamespace: false
+# Node.js doesn't install a SIGTERM handler, and as PID 1 the kernel ignores signals without
+# a handler, so pods would hang until SIGKILL at the end of the grace period.
+# Sharing the process namespace makes the pause container PID 1, so node gets SIGTERM's
+# default action (exit) immediately – fixed at the platform level, no app code change.
+shareProcessNamespace: true
 
 service:
   type: ClusterIP
@@ -74,6 +76,11 @@ ingress:
   enabled: true
   className: traefik       # RKE2's bundled ingress controller
   annotations: {}
+  # Traefik Middleware on the Ingress: strips stack-disclosing headers (Express sends
+  # "X-Powered-By: Express", SonarQube javascript:S5689) and adds security headers.
+  securityHeaders:
+    enabled: true
+    removeResponseHeaders: [X-Powered-By, Server]
   host: app.34.56.31.129.nip.io
   # Only public endpoints are routed. /classified, /metrics, /ready and /live are
   # deliberately NOT exposed outside the cluster.
