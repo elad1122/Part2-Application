@@ -1,0 +1,155 @@
+# Default values for sample-nodejs.
+
+# -- Ignored when autoscaling.enabled is true (the HPA owns the replica count)
+replicaCount: 2
+
+image:
+  # Pushed by the CI pipeline; override per environment
+  repository: docker.io/elad1122/sample-nodejs
+  # Defaults to .Chart.AppVersion when empty. Prefer an immutable tag (or digest) per release.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Port the app listens on. Passed to the app as PORT (via the ConfigMap) and used for the
+# containerPort and probes, so there's a single source of truth.
+containerPort: 8080
+
+# -- Non-secret configuration -> ConfigMap -> environment variables
+config:
+  NODE_ENV: production
+  # Keep the V8 heap below the container memory limit (128Mi), leaving room for
+  # buffers and native memory, so Node GCs before the kernel OOM-kills the container.
+  NODE_OPTIONS: "--max-old-space-size=96"
+
+# -- Secret configuration -> Secret -> environment variables.
+# The app needs no secrets today; the chart supports them for future use.
+# Either reference an existing Secret (recommended: created by Sealed/External Secrets)...
+existingSecret: ""
+# ...or let the chart create one (avoid committing real values to Git).
+secret: {}
+  # API_KEY: changeme
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The app never calls the Kubernetes API, so don't mount a token
+  automountServiceAccountToken: false
+
+# In-cluster Prometheus scraping of the app's /metrics endpoint
+# (adds prometheus.io/scrape, /path and /port=containerPort annotations to the pods)
+metrics:
+  scrapeAnnotations: true
+  path: /metrics
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000      # "node" user that exists in the node:alpine base image
+  runAsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true   # the app writes nothing to disk
+  capabilities:
+    drop: [ALL]
+
+# Node.js doesn't install a SIGTERM handler, and as PID 1 the kernel ignores signals without
+# a handler, so pods would hang until SIGKILL at the end of the grace period.
+# Sharing the process namespace makes the pause container PID 1, so node gets SIGTERM's
+# default action (exit) immediately.
+shareProcessNamespace: true
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: traefik       # RKE2's bundled ingress controller
+  annotations: {}
+  host: app.34.56.31.129.nip.io
+  # Only public endpoints are routed. /classified, /metrics, /ready and /live are
+  # deliberately NOT exposed outside the cluster.
+  paths:
+    - path: /my-app
+      pathType: Exact
+    - path: /about
+      pathType: Exact
+  tls: []
+  #  - secretName: sample-nodejs-tls
+  #    hosts: [app.example.com]
+
+# Sizing: an idle Express app uses ~40-50Mi RSS and almost no CPU.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+probes:
+  # Gives the app up to 30s to start before liveness kicks in (instead of a fixed initialDelay)
+  startup:
+    path: /live
+    periodSeconds: 2
+    failureThreshold: 15
+  # Not ready -> removed from Service endpoints (no traffic), but not restarted
+  readiness:
+    path: /ready
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  # Not alive -> container restarted
+  liveness:
+    path: /live
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# Zero-downtime rolling updates: start a new pod before stopping an old one
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+revisionHistoryLimit: 5
+terminationGracePeriodSeconds: 20
+# Lets endpoints/ingress stop routing to the pod before it exits
+preStopSleepSeconds: 5
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Spread replicas across nodes (soft, so pods still schedule if a node is full)
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: ScheduleAnyway
+
+networkPolicy:
+  # Only allow traffic to the app port from the ingress controller and Prometheus namespaces
+  enabled: false
+  ingressNamespaces:
+    - kube-system     # Traefik (RKE2)
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

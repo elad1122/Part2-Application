@@ -1,0 +1,36 @@
+# `helm test <release>`: checks the Service routes to a ready pod
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "sample-nodejs.fullname" . }}-test
+  labels:
+    # Deliberately NOT the app's selector labels, so the Service/PDB never select this pod
+    app.kubernetes.io/name: {{ include "sample-nodejs.name" . }}-test
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: wget
+      image: busybox:1.37
+      command: ["sh", "-c"]
+      args:
+        - >-
+          wget -qO- http://{{ include "sample-nodejs.fullname" . }}:{{ .Values.service.port }}/ready &&
+          wget -qO- http://{{ include "sample-nodejs.fullname" . }}:{{ .Values.service.port }}/my-app
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 50m, memory: 32Mi }

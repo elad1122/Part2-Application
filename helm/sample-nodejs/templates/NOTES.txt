@@ -1,0 +1,15 @@
+{{ include "sample-nodejs.fullname" . }} {{ include "sample-nodejs.imageTag" . }} deployed to namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+
+Public endpoints:
+{{- range .Values.ingress.paths }}
+  http://{{ $.Values.ingress.host }}{{ .path }}
+{{- end }}
+{{- end }}
+
+In-cluster: http://{{ include "sample-nodejs.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Check:   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+Test:    helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+Metrics: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sample-nodejs.fullname" . }} 8080:{{ .Values.service.port }}  then  curl localhost:8080/metrics
