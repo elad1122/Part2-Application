@@ -1,0 +1,10 @@
+# Gitleaks config: default rules + narrowly scoped false-positive allowlist.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "SonarQube project key/organization are public identifiers, not secrets"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = ['''^sonar\.(projectKey|organization)=''']
+paths = ['''^sonar-project\.properties$''']
