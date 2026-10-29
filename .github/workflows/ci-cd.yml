@@ -58,29 +58,35 @@ jobs:
 
   # ---------------------------------------------------------------------------
   sast:
-    name: SAST (SonarQube Cloud)
+    name: SAST (SonarQube)
     runs-on: ubuntu-latest
+    # Self-hosted SonarQube Community, started fresh for every run: no external account or
+    # stored secret; credentials are generated per run and die with the job.
+    services:
+      sonarqube:
+        image: sonarqube:26.10.0.133078-community@sha256:aa0d41212704d1ed35f7ae3b49886b39f639590baf8020cdb191c2a2eb8f9eae
+        ports: ["9000:9000"]
+        env:
+          SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    env:
+      SONAR_HOST_URL: http://localhost:9000
+      SONAR_PROJECT_KEY: sample-nodejs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0            # full history for accurate "new code" detection and blame
-      - name: Check SONAR_TOKEN is configured
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: |
-          if [ -z "$SONAR_TOKEN" ]; then
-            echo "::error::SONAR_TOKEN secret is missing – see README 'One-time setup'"; exit 1
-          fi
+          fetch-depth: 0            # full history for blame / SCM data
+      - name: Prepare SonarQube (rotate admin password, strict Quality Gate, token)
+        run: bash .github/scripts/sonarqube-setup.sh
       - name: SonarQube scan + wait for Quality Gate
         uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: https://sonarcloud.io
         with:
           # Fails this step (and the pipeline) when the Quality Gate fails
           args: >
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300
+      - name: Publish SonarQube results (summary + annotations)
+        if: always() && env.SONAR_ADMIN_PW != ''
+        run: bash .github/scripts/sonarqube-report.sh
 
   # ---------------------------------------------------------------------------
   sca:

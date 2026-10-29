@@ -3,8 +3,8 @@
 useDefault = true
 
 [[allowlists]]
-description = "SonarQube project key/organization are public identifiers, not secrets"
+description = "SonarQube project key/name are public identifiers, not secrets"
 targetRules = ["generic-api-key"]
 regexTarget = "line"
-regexes = ['''^sonar\.(projectKey|organization)=''']
+regexes = ['''^sonar\.(projectKey|projectName|organization)=''']
 paths = ['''^sonar-project\.properties$''']

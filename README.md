@@ -13,7 +13,7 @@ A lightweight Node.js application. It has basic web endpoints and Prometheus met
 
 ## Prerequisites
 
-- Node.js (v22.1.0)
+- Node.js 24 (Active LTS, the same version as the runtime image)
 
 ## Endpoints
 
@@ -119,7 +119,7 @@ config:
 
 | Setting | Why |
 |---|---|
-| `runAsNonRoot: true`, `runAsUser: 1000` | Runs as the unprivileged `node` user from the base image, not root |
+| `runAsNonRoot: true`, `runAsUser: 65532` | Runs as the unprivileged `nonroot` user of the distroless image, not root |
 | `readOnlyRootFilesystem: true` | The app writes nothing, so an attacker can't drop files or modify code |
 | `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]` | No setuid tricks, no Linux capabilities |
 | `seccompProfile: RuntimeDefault` | Blocks dangerous syscalls |
@@ -132,7 +132,7 @@ config:
 - **`replicaCount: 2` and topology spread across nodes** (`maxSkew: 1`, soft): losing a node doesn't take the app down.
 - **PodDisruptionBudget `minAvailable: 1`:** node drains and upgrades evict pods one at a time.
 - **`preStop` sleep (5s):** Traefik and the endpoints controller stop routing to the pod *before* it exits, so in-flight requests aren't dropped.
-- **`shareProcessNamespace: true`:** Node.js has no SIGTERM handler, and as **PID 1** the kernel ignores signals that have no handler, so pods would hang until SIGKILL at the end of the grace period. With a shared process namespace, the pause container is PID 1, and node exits on SIGTERM right away. The cleaner long-term fix is in the image: run node under `tini` / `docker run --init`, or handle SIGTERM in `app.js`.
+- **Graceful shutdown in `app.js`:** Node.js has no default SIGTERM handler, and as **PID 1** the kernel ignores signals that have no handler, so pods would hang until SIGKILL at the end of the grace period. `app.js` handles SIGTERM itself: it stops accepting connections, finishes in-flight requests, then exits, with a 10s safety net. The CI smoke test checks the container stops in under 5 seconds. (`shareProcessNamespace` stays in the chart as an option for images that can't handle signals, and defaults to `false`.)
 - **`revisionHistoryLimit: 5`:** enough ReplicaSets kept for quick rollbacks.
 
 ### Autoscaling (optional)
@@ -145,7 +145,7 @@ config:
 
 ### Prerequisites
 - `kubectl` pointing at the cluster (context `rke2-devsecops`) and Helm 3 or 4
-- The app image pushed to a registry. The default is `docker.io/elad1122/sample-nodejs:<appVersion>`; it's built and pushed by the CI pipeline. Override it with `--set image.repository=… --set image.tag=…`
+- The app image, which the CI/CD pipeline builds, scans, signs and pushes to `ghcr.io/elad1122/sample-nodejs:<version>`. The chart's `appVersion` (bumped by every release) is the default tag. Override it with `--set image.repository=… --set image.tag=…`
 
 ### 1. Validate the chart
 ```bash
@@ -162,7 +162,6 @@ helm template sample-nodejs helm/sample-nodejs -n default | kubectl apply --dry-
 ```bash
 helm upgrade --install sample-nodejs helm/sample-nodejs \
   -n default \
-  --set image.repository=docker.io/elad1122/sample-nodejs \
   --set image.tag=1.0.0 \
   --wait
 ```
