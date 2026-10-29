@@ -13,7 +13,7 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 # ---- Stage 2: runtime ------------------------------------------------------
 # Distroless: only the Node runtime and its libraries – no shell, no package manager, no npm.
 # Far fewer CVEs and nothing for an attacker to use if the app is compromised.
-FROM node:21-alpine
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:a6c34457f6da4295807e051411c7783739c65b997a324fed14e4fa292615ae91
 WORKDIR /app
 ENV NODE_ENV=production
 # Only what the app needs at runtime, owned by root and read-only for the app user
