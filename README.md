@@ -221,3 +221,133 @@ horizontalpodautoscaler.autoscaling/sample-nodejs created (server dry run)
 ingress.networking.k8s.io/sample-nodejs created (server dry run)
 pod/sample-nodejs-test created (server dry run)
 ```
+
+---
+
+# CI/CD pipeline (DevSecOps)
+
+**Tool:** GitHub Actions, in [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml). It runs on every push and PR to `main` and `dev`, and can also be started manually.
+
+```
+ push / PR ─┬─▶ secrets  Gitleaks (full git history)                 ─┐
+            ├─▶ sast     SonarQube + strict Quality Gate             ─┤
+            ├─▶ sca      npm audit + Trivy (dependencies)            ─┼─▶ image ──────────────────────────────▶ release
+            ├─▶ config   Hadolint + Trivy config (Dockerfile, Helm)  ─┤   build (not pushed)                    (main + feat/fix only)
+            └─▶ version  SemVer from Conventional Commits            ─┘   → Trivy image gate: HIGH/CRITICAL=STOP bump package.json + chart
+                                                                          → SBOM → smoke test                    git tag vX.Y.Z
+                                                                          → [release] push GHCR → cosign sign    GitHub Release + changelog
+```
+
+**Every security job must pass before the image is even built.** If any gate fails, nothing downstream runs. On `dev` and PRs, everything is built and scanned but **nothing is published**.
+
+## Security checks: what fails the pipeline
+
+| Job | Tool | Fails when | Why it matters |
+|---|---|---|---|
+| **Secret scan** | [Gitleaks](https://github.com/gitleaks/gitleaks) 8.30.1 (container pinned by digest), full history, `--redact` | Any credential, token or key is committed, now or in any past commit | Leaked secrets are the most common breach cause; history counts because deleted secrets are still readable in git |
+| **SAST** | **SonarQube Community 26.10** (official container) | The **Quality Gate** fails (details below) | Finds vulnerabilities, bugs and insecure patterns in the source code |
+| **SCA** (dependencies) | `npm audit --audit-level=high` + **Trivy fs** | Any **HIGH/CRITICAL** CVE in a dependency | Most app vulnerabilities come from third-party packages |
+| **Misconfiguration** | **Hadolint** (Dockerfile) + **Trivy config** (Dockerfile + rendered Helm chart) | Dockerfile bad practices (warning+), or HIGH/CRITICAL Kubernetes/Docker misconfigurations | Catches root containers, missing limits, privileged pods and so on before they ship |
+| **Image scan** | **Trivy image** on the built image | **Any HIGH or CRITICAL CVE, which blocks the push and the deployment** | The assignment's hard requirement: vulnerable images never reach the registry |
+| **Smoke test** | `docker run --read-only --cap-drop ALL --init` + curl | The app doesn't start, the probes or `/metrics` fail, it runs as root, or it takes ≥5s to stop on SIGTERM | Proves the hardened image actually works with the settings the chart uses |
+
+All Trivy results are also uploaded as **SARIF** to the repo's *Security → Code scanning* tab, so findings are tracked over time.
+
+### SAST: SonarQube in CI, with a strict gate
+- **Self-hosted:** a fresh **SonarQube Community** server starts as a *service container* in every run. No external account or long-lived secret is needed.
+  - [`sonarqube-setup.sh`](.github/scripts/sonarqube-setup.sh) **rotates the factory admin password** to a random one, creates a **per-run analysis token**, and installs the gate. Both are masked in logs and die with the job.
+- **Quality Gate `CI-Strict`, applied to *all* code:** the built-in "Sonar way" gate only checks *new* code, and on a fresh server every run is a first analysis with no baseline, so it would always pass. These conditions apply to the whole codebase instead:
+
+  | Condition | Fails when |
+  |---|---|
+  | Security issues (vulnerabilities) | > 0 |
+  | Reliability issues (bugs) | > 0 |
+  | Security hotspots reviewed | < 100% (any unreviewed hotspot) |
+  | Maintainability rating | worse than A |
+- **The gate is enforced** with `sonar.qualitygate.wait=true`, so the scanner step fails when the gate is red.
+- **Results:** [`sonarqube-report.sh`](.github/scripts/sonarqube-report.sh) publishes the gate status, metrics, issues and hotspots as **annotations on the run** and in the job summary. The server is thrown away after the job, so these are the durable record.
+
+## Version bumping (SemVer + Conventional Commits)
+
+**Commit messages decide the next version.** [`next-version.sh`](.github/scripts/next-version.sh) reads the commits since the last `vX.Y.Z` tag:
+
+| Commit message | Bump | Example |
+|---|---|---|
+| `feat!: …` or `BREAKING CHANGE:` in the body | **major** | 1.4.2 → 2.0.0 |
+| `feat: …` | **minor** | 1.4.2 → 1.5.0 |
+| `fix: …` / `perf: …` | **patch** | 1.4.2 → 1.4.3 |
+| `docs:`, `chore:`, `ci:`, `test:` … | no release | — |
+| *(no tag yet)* | first release = `package.json` version | 1.0.0 |
+
+**On `main`,** after every gate passes:
+1. The image is pushed as **`ghcr.io/elad1122/sample-nodejs:X.Y.Z`** plus `sha-<commit>`. **There is no `latest` tag**, so every tag means exactly one image.
+2. The release job bumps `package.json` and the Helm chart's `version` / `appVersion` (the chart's default image tag). It commits `chore(release): vX.Y.Z [skip ci]`, so `[skip ci]` and the `GITHUB_TOKEN` push don't start a loop.
+3. It creates an **annotated tag `vX.Y.Z`** and a **GitHub Release** with a changelog built from the commit messages, with the SBOM attached.
+
+**Everywhere else** (dev, PRs), the version is a pre-release label such as `1.0.0-dev.g1e3502c`, used for the image labels only.
+
+**Dependabot** ([`.github/dependabot.yml`](.github/dependabot.yml)) opens weekly PRs for npm packages, base-image digests and the pinned Actions. Its commit prefixes (`fix(deps)`, `fix(docker)`, `ci`) mean security updates turn into patch releases automatically.
+
+The logic was tested for every case: first release, docs-only (no release), fix → patch, feat → minor, breaking → major, and PRs (never release).
+
+## Secure image (Dockerfile)
+
+| Practice | How |
+|---|---|
+| Minimal runtime | **Multi-stage**: `node:24-trixie-slim` installs the dependencies, and the runtime is **`gcr.io/distroless/nodejs24-debian13:nonroot`**, with no shell, package manager or npm |
+| Reproducible | Base images **pinned by digest**; `npm ci` from the lockfile |
+| No dev or untrusted code | `npm ci --omit=dev --ignore-scripts`: no devDependencies, and no dependency install scripts run during the build |
+| Least content | Only `node_modules`, `package.json` and `app.js` are copied, not the whole repo |
+| Non-root | `USER nonroot` (uid 65532), matching the chart's `runAsUser` |
+| Current runtime | Node **24** (Active LTS); the original `node:21-alpine` reached end-of-life in 2024 |
+
+## Supply-chain security
+
+- **Every Action is pinned to a full commit SHA** (`uses: actions/checkout@3d3c42e… # v7.0.1`), not a movable tag. A compromised or re-tagged third-party action can't inject code, and Dependabot keeps the pins current.
+- **Least-privilege tokens:** workflow-level `permissions: contents: read`. Only the jobs that need more ask for it: `packages: write` for the GHCR push, `id-token: write` for keyless signing, `security-events: write` for SARIF, and `contents: write` for the release job only.
+- **No stored registry password:** GHCR uses the run's short-lived `GITHUB_TOKEN`.
+- **The scanned image is the pushed image:** the image is built once, loaded locally, scanned, smoke-tested, and then *that same image* is tagged and pushed. Nothing gets rebuilt after scanning.
+- **Signing and SBOM:** on release the image is **signed with cosign keyless** (Sigstore, using GitHub's OIDC identity, so there are no keys to manage), and a **CycloneDX SBOM** is attached as a signed attestation and to the GitHub Release. To verify:
+  ```bash
+  cosign verify ghcr.io/elad1122/sample-nodejs:<version> \
+    --certificate-identity-regexp 'https://github.com/elad1122/Part2-Application/.github/workflows/ci-cd.yml@.*' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+- **Concurrency:** a newer run cancels older runs on the same branch, except on `main`, where releases are never cancelled halfway.
+
+## Findings the pipeline caught, and how each was handled
+
+The scope of this work is DevOps only; **application code (`app.js`) is unchanged.**
+
+| # | Gate | Finding | Resolution |
+|---|---|---|---|
+| 1 | SCA | `package-lock.json`: **3 HIGH + 1 CRITICAL** (express ≤4.22.2, body-parser, path-to-regexp, proxy-addr, qs) | `npm audit fix`: lockfile updated to **express 4.22.3** and its patched dependencies. `package.json` is unchanged |
+| 2 | SCA (Trivy fs) | An unused **Dagger** CI module (`.dagger/`) with **12 vulnerable Go modules** (grpc, golang.org/x/net, OpenTelemetry) | Removed, since GitHub Actions is the pipeline. It wasn't part of the app or the image |
+| 3 | Secret scan | `sonar.projectKey=…` flagged as `generic-api-key` | **False positive** (a public identifier). Allowlisted in [`.gitleaks.toml`](.gitleaks.toml), scoped to that rule, file and key only |
+| 4 | Secret scan | `curl -u admin:admin` in an earlier version of the Sonar setup script | SonarQube's documented factory default for the throwaway container (rotated at startup). The script no longer writes it literally, and the allowlist is scoped to that single past commit and rule |
+| 5 | **SAST** | **`javascript:S5689` VULNERABILITY:** Express discloses its version through the `X-Powered-By` header. **The Quality Gate failed and blocked the pipeline** | **Mitigated at the platform:** the Helm chart's Traefik Middleware strips `X-Powered-By` and `Server` and adds security headers. The rule is marked accepted for `app.js` in [`sonar-project.properties`](sonar-project.properties) with that reason, so any other finding still fails the gate. The proper long-term fix is one line in the app, `app.disable('x-powered-by')`, for the dev team |
+| 6 | Image | Base `node:21-alpine` (end-of-life) | Replaced by distroless Node 24. Trivy finds **0 HIGH/CRITICAL** in the new image |
+
+## Evidence: real pipeline runs
+
+| Run | What it shows |
+|---|---|
+| [#7](https://github.com/elad1122/Part2-Application/actions/runs/40954665353) | **SAST gate blocks:** SonarQube found S5689 (`vulnerabilities=1`), *Quality Gate ERROR*, the image job was skipped |
+| [#9](https://github.com/elad1122/Part2-Application/actions/runs/40955687107) | **All green with the original `app.js`:** every gate passed, *Quality Gate OK*, the image built, Trivy found 0 HIGH/CRITICAL, the smoke test passed, nothing published (dev) |
+| [#10](https://github.com/elad1122/Part2-Application/actions/runs/40956224642) | **Trivy gate blocks deployment:** a demo commit used the old `node:21-alpine` base. The *Trivy image gate* failed, and SBOM, smoke test, push and signing were all **skipped**. The demo commit was reverted right after |
+
+## How to use it
+
+- **Day-to-day:** work on `dev` and open a PR to `main`. Every push and PR runs all the gates.
+- **Release:** merge to `main` with at least one `feat:` / `fix:` commit. The pipeline publishes, signs, bumps the version, tags and releases.
+- **After the first release:** the GHCR package `sample-nodejs` is private by default. Either make it public (GitHub → Packages → sample-nodejs → Package settings → Change visibility), or create an image-pull Secret in the cluster and set `imagePullSecrets` in the chart.
+- **Recommended repo settings:** branch protection on `main` that requires the CI/CD checks to pass, so a PR can't be merged past a failed gate. If you enable it, allow `github-actions[bot]` to push the release commit, or change the release step to open a PR instead.
+
+### Reproduce the checks locally
+```bash
+npm ci --ignore-scripts && npm audit --omit=dev --audit-level=high
+docker build -t sample-nodejs:local .
+docker run --rm aquasec/trivy image --severity HIGH,CRITICAL --exit-code 1 sample-nodejs:local
+docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact
+docker run --rm -i hadolint/hadolint < Dockerfile
+```
