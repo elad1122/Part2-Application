@@ -13,7 +13,8 @@ api() {
   out=$(curl -sS -u "$auth" -X "$method" -w '\n%{http_code}' "$H$path" "$@")
   code=${out##*$'\n'}; out=${out%$'\n'*}
   if [ "$code" -ge 400 ]; then
-    echo "::error title=SonarQube API $method $path -> HTTP $code::$(jq -r '[.errors[]?.msg] | join("; ")' <<< "$out" 2>/dev/null || echo "$out")"
+    # stderr, so the annotation still shows when the caller discards stdout
+    echo "::error title=SonarQube API $method $path -> HTTP $code::$(jq -r '[.errors[]?.msg] | join("; ")' <<< "$out" 2>/dev/null || echo "$out")" >&2
     return 1
   fi
   printf '%s' "$out"
@@ -34,19 +35,27 @@ api "$DEFAULT_LOGIN:$DEFAULT_PASSWORD" POST /api/users/change_password \
 ADMIN="$DEFAULT_LOGIN:$PW"
 echo "admin password rotated"
 
-# 2. Classic metrics (bugs / vulnerabilities / hotspots) for the gate conditions
-api "$ADMIN" POST /api/settings/set -d key=sonar.multi-quality-mode.enabled -d value=false >/dev/null \
-  || echo "::warning::could not switch to Standard Experience; continuing"
-
-# 3. Strict Quality Gate on OVERALL code.
+# 2. Strict Quality Gate on OVERALL code.
 #    The built-in "Sonar way" gate only checks *new* code, and on a fresh server every run is a
 #    first analysis with no new-code baseline, so it would always pass. These conditions apply
 #    to the whole codebase on every run.
+#    SonarQube 2025+ defaults to MQR mode (software-quality metrics); older/Standard mode uses the
+#    classic metrics. Each condition tries the MQR metric first, then the classic equivalent.
 api "$ADMIN" POST /api/qualitygates/create -d name=CI-Strict >/dev/null
-for cond in vulnerabilities:0 bugs:0 security_hotspots:0 sqale_rating:1; do
-  api "$ADMIN" POST /api/qualitygates/create_condition \
-    -d gateName=CI-Strict -d metric="${cond%%:*}" -d op=GT -d error="${cond##*:}" >/dev/null
-  echo "gate condition: ${cond%%:*} > ${cond##*:} -> FAIL"
+for cond in \
+  "software_quality_security_issues|vulnerabilities:0" \
+  "software_quality_reliability_issues|bugs:0" \
+  "security_hotspots|security_hotspots:0" \
+  "software_quality_maintainability_rating|sqale_rating:1"; do
+  metrics=${cond%%:*}; threshold=${cond##*:}; added=""
+  for m in ${metrics/|/ }; do
+    if api "$ADMIN" POST /api/qualitygates/create_condition \
+         -d gateName=CI-Strict -d metric="$m" -d op=GT -d error="$threshold" >/dev/null 2>&1; then
+      added=$m; break
+    fi
+  done
+  [ -n "$added" ] || { echo "::error::no supported metric among: $metrics" >&2; exit 1; }
+  echo "gate condition: $added > $threshold -> FAIL"
 done
 api "$ADMIN" POST /api/qualitygates/set_as_default -d name=CI-Strict >/dev/null
 

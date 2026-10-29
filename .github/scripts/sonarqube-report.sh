@@ -9,7 +9,7 @@ A=(-fsS -u "admin:${SONAR_ADMIN_PW:?}")
 
 gate=$(curl "${A[@]}" "$H/api/qualitygates/project_status?projectKey=$P")
 status=$(jq -r .projectStatus.status <<< "$gate")
-measures=$(curl "${A[@]}" "$H/api/measures/component?component=$P&metricKeys=bugs,vulnerabilities,security_hotspots,code_smells,sqale_rating,ncloc")
+measures=$(curl "${A[@]}" "$H/api/measures/component?component=$P&metricKeys=software_quality_security_issues,software_quality_reliability_issues,software_quality_maintainability_issues,software_quality_maintainability_rating,bugs,vulnerabilities,code_smells,sqale_rating,security_hotspots,ncloc")
 
 {
   echo "## SonarQube SAST – Quality Gate: **$status**"
