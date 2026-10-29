@@ -4,9 +4,9 @@
 replicaCount: 2
 
 image:
-  # Pushed by the CI pipeline; override per environment
-  repository: docker.io/elad1122/sample-nodejs
-  # Defaults to .Chart.AppVersion when empty. Prefer an immutable tag (or digest) per release.
+  # Built, scanned, signed and pushed by the CI/CD pipeline (.github/workflows/ci-cd.yml)
+  repository: ghcr.io/elad1122/sample-nodejs
+  # Defaults to .Chart.AppVersion, which the pipeline bumps on every release.
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -51,8 +51,8 @@ podLabels: {}
 
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000      # "node" user that exists in the node:alpine base image
-  runAsGroup: 1000
+  runAsUser: 65532     # "nonroot" user of the distroless runtime image
+  runAsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 
@@ -62,11 +62,9 @@ securityContext:
   capabilities:
     drop: [ALL]
 
-# Node.js doesn't install a SIGTERM handler, and as PID 1 the kernel ignores signals without
-# a handler, so pods would hang until SIGKILL at the end of the grace period.
-# Sharing the process namespace makes the pause container PID 1, so node gets SIGTERM's
-# default action (exit) immediately.
-shareProcessNamespace: true
+# Not needed: app.js handles SIGTERM itself (graceful shutdown). Only enable for images whose
+# process ignores SIGTERM as PID 1 – it makes the pause container PID 1 instead.
+shareProcessNamespace: false
 
 service:
   type: ClusterIP

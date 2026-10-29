@@ -45,6 +45,20 @@ app.get('/metrics', async (req, res) => {
     res.end(await register.metrics());
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
+
+// Graceful shutdown: Kubernetes sends SIGTERM before stopping a pod. Node has no default
+// handler, and as PID 1 in a container the signal would be ignored until SIGKILL.
+// Stop accepting new connections, let in-flight requests finish, then exit.
+function shutdown(signal) {
+    console.log(`${signal} received, shutting down`);
+    server.close(() => process.exit(0));
+    // Close idle keep-alive connections so close() doesn't wait for them
+    server.closeIdleConnections();
+    // Safety net if connections don't drain in time
+    setTimeout(() => process.exit(1), 10000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
