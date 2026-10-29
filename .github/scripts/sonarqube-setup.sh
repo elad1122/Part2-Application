@@ -42,20 +42,21 @@ echo "admin password rotated"
 #    SonarQube 2025+ defaults to MQR mode (software-quality metrics); older/Standard mode uses the
 #    classic metrics. Each condition tries the MQR metric first, then the classic equivalent.
 api "$ADMIN" POST /api/qualitygates/create -d name=CI-Strict >/dev/null
+# Format: "<MQR metric>|<classic metric>:<op>:<threshold>"  (the gate FAILS when the condition is true)
 for cond in \
-  "software_quality_security_issues|vulnerabilities:0" \
-  "software_quality_reliability_issues|bugs:0" \
-  "security_hotspots|security_hotspots:0" \
-  "software_quality_maintainability_rating|sqale_rating:1"; do
-  metrics=${cond%%:*}; threshold=${cond##*:}; added=""
+  "software_quality_security_issues|vulnerabilities:GT:0" \
+  "software_quality_reliability_issues|bugs:GT:0" \
+  "security_hotspots_reviewed:LT:100" \
+  "software_quality_maintainability_rating|sqale_rating:GT:1"; do
+  IFS=: read -r metrics op threshold <<< "$cond"; added=""
   for m in ${metrics/|/ }; do
     if api "$ADMIN" POST /api/qualitygates/create_condition \
-         -d gateName=CI-Strict -d metric="$m" -d op=GT -d error="$threshold" >/dev/null 2>&1; then
+         -d gateName=CI-Strict -d metric="$m" -d op="$op" -d error="$threshold" >/dev/null 2>&1; then
       added=$m; break
     fi
   done
   [ -n "$added" ] || { echo "::error::no supported metric among: $metrics" >&2; exit 1; }
-  echo "gate condition: $added > $threshold -> FAIL"
+  echo "gate condition: $added $op $threshold -> FAIL"
 done
 api "$ADMIN" POST /api/qualitygates/set_as_default -d name=CI-Strict >/dev/null
 
