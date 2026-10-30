@@ -352,6 +352,14 @@ The scope of this work is DevOps only; **application code (`app.js`) is unchange
 | [#9](https://github.com/elad1122/Part2-Application/actions/runs/40955687107) | **All green with the original `app.js`:** every gate passed, *Quality Gate OK*, the image built, Trivy found 0 HIGH/CRITICAL, the smoke test passed, nothing published (dev) |
 | [#10](https://github.com/elad1122/Part2-Application/actions/runs/40956224642) | **Trivy gate blocks deployment:** a demo commit used the old `node:21-alpine` base. The *Trivy image gate* failed, and SBOM, smoke test, push and signing were all **skipped**. The demo commit was reverted right after |
 
+## Deployment (GitOps with Argo CD)
+
+Deployment config lives in a **separate infra repo, [Part3-GitOps](https://github.com/elad1122/Part3-GitOps)**. Its README explains why, and how Argo CD is set up.
+
+The last pipeline job, `deploy`, runs only after every gate, the image push and the release have passed. It changes one line in that repo (`targetRevision: vX.Y.Z`) and pushes. **The pipeline never talks to the cluster:** Argo CD sees the commit and syncs. So a build blocked by a gate can't reach the cluster.
+
+It authenticates with `GITOPS_DEPLOY_KEY`, a deploy key with write access to that one repo only.
+
 ## How to use it
 
 - **Day-to-day:** work on `dev` and open a PR to `main`. Every push and PR runs all the gates.
