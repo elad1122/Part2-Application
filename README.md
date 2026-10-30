@@ -354,11 +354,9 @@ The scope of this work is DevOps only; **application code (`app.js`) is unchange
 
 ## Deployment (GitOps with Argo CD)
 
-Deployment config lives in a **separate infra repo, [Part3-GitOps](https://github.com/elad1122/Part3-GitOps)**. Its README explains why, and how Argo CD is set up.
+The Argo CD `AppProject` and `Application` live in a **separate infra repo, [Part3-GitOps](https://github.com/elad1122/Part3-GitOps)**. Its README explains why. The Helm chart and its single `values.yaml` stay in this repo.
 
-The last pipeline job, `deploy`, runs only after every gate, the image push and the release have passed. It changes one line in that repo (`targetRevision: vX.Y.Z`) and pushes. **The pipeline never talks to the cluster:** Argo CD sees the commit and syncs. So a build blocked by a gate can't reach the cluster.
-
-It authenticates with `GITOPS_DEPLOY_KEY`, a deploy key with write access to that one repo only.
+The Application follows the newest `vX.Y.Z` tag of this repo. The release job creates that tag only after every gate and the image push have passed, so a blocked build can't reach the cluster. **The pipeline never talks to the cluster and holds no cluster or deploy credentials:** it creates the tag, and Argo CD syncs within about 3 minutes.
 
 ## How to use it
 

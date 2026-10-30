@@ -4,7 +4,9 @@
 #  sast    ─┤
 #  sca     ─┼─▶ image (build → Trivy gate → smoke test → [main] push + sign + SBOM) ─▶ [main] release
 #  config  ─┤
-#  version ─┘                                              release ─▶ [main] deploy (GitOps repo)
+#  version ─┘
+#
+# Deployment: Argo CD follows the newest vX.Y.Z tag, which only the release job creates.
 #
 # Every security job must pass before the image is built. On PRs and dev nothing is published.
 # On main: SemVer from Conventional Commits, image pushed to GHCR, signed, chart bumped, GitHub Release.
@@ -349,34 +351,3 @@ jobs:
             git log --no-merges --format='- %s (%h)' $RANGE | grep -v 'chore(release)' || true
           } > notes.md
           gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md sbom.cdx.json
-
-  # ---------------------------------------------------------------------------
-  # GitOps: never touches the cluster. It only records the desired version in the infra repo;
-  # Argo CD sees the commit and syncs. Runs only after every gate, the push and the release passed.
-  deploy:
-    name: Deploy (update GitOps repo)
-    needs: [release, version]
-    if: needs.version.outputs.release == 'true'
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/Part3-GitOps
-          ssh-key: ${{ secrets.GITOPS_DEPLOY_KEY }}   # write access to that one repo only
-      - name: Set the chart version to deploy
-        run: |
-          sed -i -E "s/^(\s*targetRevision: )v[0-9]+\.[0-9]+\.[0-9]+.*/\1v$VERSION/" argocd/apps/sample-nodejs.yaml
-          grep -q "targetRevision: v$VERSION" argocd/apps/sample-nodejs.yaml
-          git diff
-      - name: Commit and push
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add argocd/apps/sample-nodejs.yaml
-          if git diff --cached --quiet; then
-            echo "Already at v$VERSION"; exit 0
-          fi
-          git commit -m "deploy: sample-nodejs v$VERSION" -m "From ${{ github.repository }}@${{ github.sha }}"
-          git push origin HEAD:main
