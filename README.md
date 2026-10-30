@@ -290,6 +290,22 @@ All Trivy results are also uploaded as **SARIF** to the repo's *Security → Cod
 
 The logic was tested for every case: first release, docs-only (no release), fix → patch, feat → minor, breaking → major, and PRs (never release).
 
+## Building and publishing the Docker image
+
+- **Builder: Docker** with its BuildKit engine (`docker/setup-buildx-action` + `docker/build-push-action`). Kaniko isn't needed: GitHub-hosted runners provide a Docker daemon, and Kaniko's main advantage is building inside a cluster without one. Layers are cached between runs (`type=gha`).
+- **Registry: GitHub Container Registry (public)**, `ghcr.io/elad1122/sample-nodejs`. It's integrated with the repo and authenticates with the run's short-lived `GITHUB_TOKEN`, so no registry password is stored. The cluster can pull the image without credentials.
+- **Order:** build locally → scan → smoke test → `docker tag` + `docker push`, only on a release from `main`.
+
+Published `1.0.0` image, as read from the registry:
+
+| Property | Value |
+|---|---|
+| Platform | `linux/amd64` |
+| User | `nonroot` |
+| Entrypoint / command | `/nodejs/bin/node app.js` |
+| Port | `8080/tcp` |
+| Labels | OCI `title`, `version` (`1.0.0`), `source` (this repo), `revision` (the commit it was built from) |
+
 ## Secure image (Dockerfile)
 
 | Practice | How |
@@ -340,7 +356,7 @@ The scope of this work is DevOps only; **application code (`app.js`) is unchange
 
 - **Day-to-day:** work on `dev` and open a PR to `main`. Every push and PR runs all the gates.
 - **Release:** merge to `main` with at least one `feat:` / `fix:` commit. The pipeline publishes, signs, bumps the version, tags and releases.
-- **After the first release:** the GHCR package `sample-nodejs` is private by default. Either make it public (GitHub → Packages → sample-nodejs → Package settings → Change visibility), or create an image-pull Secret in the cluster and set `imagePullSecrets` in the chart.
+- **Pulling the image:** the GHCR package `sample-nodejs` is public, so the cluster needs no pull secret. If it's ever made private, create an image-pull Secret and set `imagePullSecrets` in the chart.
 - **Recommended repo settings:** branch protection on `main` that requires the CI/CD checks to pass, so a PR can't be merged past a failed gate. If you enable it, allow `github-actions[bot]` to push the release commit, or change the release step to open a PR instead.
 
 ### Reproduce the checks locally
