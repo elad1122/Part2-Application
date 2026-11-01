@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Computes the next SemVer from Conventional Commits since the last vX.Y.Z tag.
-#   feat!: / BREAKING CHANGE  -> major
-#   feat:                     -> minor
-#   fix: / perf:              -> patch
-#   anything else (docs:, chore:, ci:, ...) -> no release
-# No tag yet -> first release = version in package.json.
-# Outputs (GITHUB_OUTPUT): version, release (true|false), previous (last tag or empty)
+
 set -euo pipefail
 
 last=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
@@ -31,7 +25,6 @@ release=false
 if [ "$bump" != "none" ] && [ "$is_main_push" = true ]; then
   release=true
 else
-  # Not a release: label the build as a pre-release of the would-be version (git-describe style)
   sha=${GITHUB_SHA:-$(git rev-parse HEAD)}
   version="$version-dev.g${sha:0:7}"
 fi

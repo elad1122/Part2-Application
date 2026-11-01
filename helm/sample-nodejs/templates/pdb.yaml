@@ -6,7 +6,6 @@ metadata:
   labels:
     {{- include "sample-nodejs.labels" . | nindent 4 }}
 spec:
-  # Node drains/upgrades evict at most one pod at a time, keeping the app available
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
