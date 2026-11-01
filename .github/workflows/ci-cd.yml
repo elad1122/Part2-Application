@@ -68,9 +68,23 @@ jobs:
           args: >
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300
-      - name: Publish SonarQube results (summary + annotations)
+      - name: Save SonarQube results
         if: always() && env.SONAR_ADMIN_PW != ''
-        run: bash .github/scripts/sonarqube-report.sh
+        run: |
+          get() { curl -fsS -u "admin:$SONAR_ADMIN_PW" "$SONAR_HOST_URL/api/$1" > "sonar-report/$2"; }
+          mkdir -p sonar-report
+          get "qualitygates/project_status?projectKey=$SONAR_PROJECT_KEY" quality-gate.json
+          get "issues/search?components=$SONAR_PROJECT_KEY&resolved=false&ps=500" issues.json
+          get "hotspots/search?project=$SONAR_PROJECT_KEY&ps=500" hotspots.json
+          get "measures/component?component=$SONAR_PROJECT_KEY&metricKeys=software_quality_security_issues,software_quality_reliability_issues,software_quality_maintainability_issues,software_quality_maintainability_rating,security_hotspots,security_hotspots_reviewed,ncloc" measures.json
+          echo "Quality Gate: $(jq -r .projectStatus.status sonar-report/quality-gate.json)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload SonarQube report
+        if: always() && env.SONAR_ADMIN_PW != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sonarqube-report
+          path: sonar-report/
+          retention-days: 30
 
   sca:
     name: Dependency scan (npm audit + Trivy)
@@ -97,7 +111,7 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0"
-      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce37
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
         if: always() && hashFiles('trivy-fs.sarif') != ''
         with:
           sarif_file: trivy-fs.sarif
