@@ -1,16 +1,15 @@
-# Keeps dependencies, base images and pinned GitHub Actions up to date with weekly PRs.
-# Every Dependabot PR runs the full CI/CD security pipeline before it can be merged.
+
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly }
-    commit-message: { prefix: "fix(deps)" }      # dependency fixes trigger a patch release
+    commit-message: { prefix: "fix(deps)" }
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly }
-    commit-message: { prefix: "fix(docker)" }    # new base-image digests (security patches)
+    commit-message: { prefix: "fix(docker)" }
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
-    commit-message: { prefix: "ci" }             # action SHA bumps: no release
+    commit-message: { prefix: "ci" }

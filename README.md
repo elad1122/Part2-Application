@@ -1,97 +1,71 @@
-# DevOps Sample Node.js App
+# Part 2 – Helm chart, CI/CD and deployment for the sample Node.js app
 
-## Overview
+This repo is my fork of the sample app. On top of it I:
 
-A lightweight Node.js application. It has basic web endpoints and Prometheus metrics integration, and is designed for Kubernetes deployment and CI/CD pipeline demonstrations.
-
-## Features
-
-- Express.js web server
-- Prometheus metrics integration
-- Readiness and liveness probe endpoints
-- Customizable port via environment variable
-
-## Prerequisites
-
-- Node.js 24 (Active LTS, the same version as the runtime image)
-
-## Endpoints
-
-| Path | Purpose | Exposed outside the cluster? |
-|---|---|---|
-| `/my-app` | "Hello, World!" (increments `root_access_total`) | ✅ Ingress |
-| `/about` | App description | ✅ Ingress |
-| `/ready` | Readiness probe | ❌ kubelet only |
-| `/live` | Liveness probe | ❌ kubelet only |
-| `/metrics` | Prometheus metrics | ❌ in-cluster scraping only |
-| `/classified` | Internal endpoint ("You should not be here!!!") | ❌ **deliberately not routed** |
+- wrote a Helm chart so the app can be deployed to the RKE2 cluster from Part 1
+- built a GitHub Actions pipeline that scans, builds, signs and releases it
+- deployed it with Argo CD
 
 ---
 
-# Helm chart
+## The Helm chart
 
-The chart is in [`helm/sample-nodejs`](helm/sample-nodejs). It deploys the app to the RKE2 cluster from Part 1.
+The chart is in `helm/sample-nodejs`:
 
 ```
 helm/sample-nodejs/
-├── Chart.yaml                  # chart 0.1.0, appVersion 1.0.0 (default image tag)
-├── values.yaml                 # every setting, with comments
+├── Chart.yaml
+├── values.yaml              # all the settings, with comments
 └── templates/
-    ├── deployment.yaml         # the app (Deployment)
-    ├── service.yaml            # ClusterIP Service
-    ├── ingress.yaml            # Traefik Ingress, public paths only
-    ├── middleware.yaml         # Traefik Middleware: strip X-Powered-By/Server, add security headers
-    ├── configmap.yaml          # non-secret config -> env vars
-    ├── secret.yaml             # optional secret config -> env vars
-    ├── serviceaccount.yaml     # dedicated SA, no API token
-    ├── hpa.yaml                # optional HorizontalPodAutoscaler
-    ├── pdb.yaml                # PodDisruptionBudget
-    ├── networkpolicy.yaml      # optional NetworkPolicy
-    ├── NOTES.txt               # post-install hints
-    └── tests/test-connection.yaml   # `helm test`
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── ingress.yaml
+    ├── middleware.yaml      # Traefik: security headers
+    ├── configmap.yaml
+    ├── serviceaccount.yaml
+    ├── pdb.yaml
+    ├── NOTES.txt
+    └── tests/test-connection.yaml
 ```
 
-## Deployment vs StatefulSet: **Deployment**
+### Deployment or StatefulSet? Deployment
 
-The app is **stateless**:
-- It keeps no data on disk.
-- It has no sessions and no database.
-- It has no leader election or per-instance identity.
-- The only in-memory state is the Prometheus counters, which are per-process by design. Prometheus aggregates them across pods.
+I went through what the app actually keeps. It writes nothing to disk, has no database or user sessions, and no instance needs to be "the leader". The only state in memory is its Prometheus counters, and those are per-process on purpose: Prometheus adds them up across pods. So every pod is interchangeable, and the app is stateless.
 
-A **StatefulSet** is meant for workloads that need **stable identity**: fixed pod names (`app-0`, `app-1`), a stable network identity through a headless Service, and **their own persistent volume per replica**, with ordered start/stop. Databases, Kafka and ZooKeeper are typical examples. This app needs none of that, and a StatefulSet would only make it slower to roll out (pods replaced one by one, in order).
+A StatefulSet is for the opposite case: pods that need a fixed name (`app-0`, `app-1`), a stable network address, and their own disk that follows them around. Databases like the MongoDB from Part 1 are the typical example. None of that applies here. A StatefulSet would also replace pods one by one in order, which only makes rollouts slower.
 
-A **Deployment** treats pods as interchangeable, which fits:
-- **rolling updates** with surge (`maxSurge: 1, maxUnavailable: 0`), so there's no downtime
-- **fast horizontal scaling** (manually or with the HPA)
-- **simple rollbacks** (`helm rollback` / ReplicaSet history)
+A Deployment gives me what this app needs:
+- rolling updates with no downtime (`maxSurge: 1`, `maxUnavailable: 0`, so a new pod is ready before an old one goes away)
+- quick scaling, by changing the replica count
+- easy rollbacks
 
-## Kubernetes features used
+### Health checks: startup, readiness and liveness probes
 
-### Probes: liveness, readiness, startup
+The app has two health endpoints, and I used three probes:
 
-| Probe | Endpoint | Settings | What happens on failure |
+| Probe | Endpoint | Settings | What happens when it fails |
 |---|---|---|---|
-| **startup** | `/live` | every 2s, up to 15 failures (30s) | Liveness and readiness don't run until it succeeds, so a slow start isn't mistaken for a hang |
-| **readiness** | `/ready` | every 5s, 2s timeout, 3 failures | The pod is **removed from the Service endpoints** (gets no traffic) but **not restarted**. Used during startup and rolling updates |
-| **liveness** | `/live` | every 10s, 2s timeout, 3 failures | The container is **restarted**. This catches a hung event loop |
+| startup | `/live` | every 2s, up to 15 failures (30s) | Nothing yet. The other two probes wait until this one passes |
+| readiness | `/ready` | every 5s, 2s timeout, 3 failures | The pod stops getting traffic, but it isn't restarted |
+| liveness | `/live` | every 10s, 2s timeout, 3 failures | The container is restarted |
 
-- **Why a startup probe instead of `initialDelaySeconds`:** a fixed delay is either too short (restart loops on a slow node) or too long (slow rollouts). The startup probe adapts.
-- **Why readiness and liveness are separate:** being temporarily not ready shouldn't trigger a restart.
+I used a startup probe instead of `initialDelaySeconds`. A fixed delay is always a guess: too short and a slow start gets the pod killed in a loop, too long and every rollout waits for nothing. The startup probe simply waits until the app is actually up.
 
-### Exposure: Service + Ingress
+I kept readiness and liveness separate on purpose. If a pod is briefly not ready (overloaded, or still starting), I want traffic to go elsewhere for a moment, not a restart. A restart is only for a pod that's really stuck, and that's what liveness catches.
+
+### How it's exposed: Service and Ingress
 
 ```
-client ──▶ app.34.56.31.129.nip.io (DNS → node IP) ──▶ Traefik (hostPort 80/443 on every node)
-       ──▶ Ingress rule (host + path) ──▶ Service sample-nodejs:80 (ClusterIP) ──▶ pods :8080
+client → app.34.56.31.129.nip.io → Traefik (ports 80/443 on every node)
+       → Ingress rule → Service sample-nodejs:80 → pods :8080
 ```
 
-- **Service `ClusterIP`, port 80 → named target port `http` (8080):** a stable in-cluster address and load balancing across ready pods. It isn't a NodePort or LoadBalancer, because the Ingress is the single public entry point.
-- **Ingress (`ingressClassName: traefik`):** Traefik is the ingress controller bundled with RKE2. The host `app.34.56.31.129.nip.io` uses nip.io wildcard DNS, so no domain needs to be registered.
-- **Only `/my-app` and `/about` are routed (`pathType: Exact`).** `/classified`, `/metrics`, `/ready` and `/live` aren't reachable from outside the cluster. That's least exposure at the edge: internal and operational endpoints stay internal.
-- **TLS:** set `ingress.tls` with a certificate Secret (e.g. from cert-manager). Without it, Traefik serves HTTPS with its default self-signed certificate.
+- **Service:** a `ClusterIP` on port 80, pointing at the container's named `http` port (8080). It gives the pods one stable address inside the cluster and spreads traffic across the ready ones. I didn't use a NodePort here, because I want a single public entry point, and that's the Ingress.
+- **Ingress:** uses Traefik, the ingress controller that comes with RKE2. The host is `app.34.56.31.129.nip.io`; nip.io turns any name ending in an IP into that IP, so I didn't need to register a domain.
+- **Only two paths are public:** the Ingress routes `/my-app` and `/about` and nothing else. `/classified`, `/metrics`, `/ready` and `/live` are only reachable inside the cluster. There's no reason for the internet to see the metrics or the health checks, and `/classified` sounds like something that shouldn't be public anyway.
+- **HTTPS:** Traefik also serves the app over HTTPS, with its default self-signed certificate.
 
-### Resource requests and limits
+### Requests and limits
 
 ```yaml
 resources:
@@ -101,275 +75,156 @@ config:
   NODE_OPTIONS: "--max-old-space-size=96"
 ```
 
-- **Requests** are what the scheduler *reserves* on a node. They're sized to the app's real baseline (an idle Express process uses about 40–50 MiB RSS and almost no CPU), so the pod fits on the small 2-vCPU nodes, where CPU requests are the scarce resource.
-- **CPU limit (200m):** short bursts (4× the request) are allowed. Going over the limit only **throttles** the container; it never kills it. This stops one pod from starving its neighbours.
-- **Memory limit (128Mi):** going over the limit gets the container **OOM-killed**, so memory limits must be set realistically.
-- **`--max-old-space-size=96`:** V8's heap cap is kept below the container limit, leaving room for buffers and native memory. Node then garbage-collects (or reports out of memory) before the kernel kills the container.
-- **The HPA depends on requests:** `targetCPUUtilizationPercentage: 70` means 70% of the **50m request**. Without requests, an HPA can't work.
-- **QoS class: Burstable** (requests < limits). Pods are evicted only after BestEffort pods under node pressure.
+- **Requests** are what the scheduler reserves for the pod. An idle Express process uses about 40–50 MiB and almost no CPU, so I sized the requests close to that. On the 2-vCPU nodes, reserved CPU is the thing that runs out first, so I didn't want to reserve more than the app needs.
+- **CPU limit (200m):** the app can burst to 4× its request. Going over a CPU limit only slows the container down; it doesn't kill it.
+- **Memory limit (128Mi):** going over a memory limit gets the container killed (OOM), so this one has to be realistic.
+- **`--max-old-space-size=96`:** by default Node doesn't know about the container's memory limit. This caps its heap at 96 MB, below the 128Mi limit, leaving room for everything outside the heap. Node then cleans up memory, or fails with its own clear error, before the kernel kills the container.
 
-### Configuration: ConfigMap and Secret
+### Configuration: ConfigMap
 
-- **ConfigMap** ([`configmap.yaml`](helm/sample-nodejs/templates/configmap.yaml)): `PORT` (from `containerPort`, so the port, probes and app always agree), `NODE_ENV=production` and `NODE_OPTIONS`. It's injected with `envFrom`.
-- **Secret** ([`secret.yaml`](helm/sample-nodejs/templates/secret.yaml)): the app needs no secrets today, but the chart supports them two ways:
-  - `existingSecret: <name>`: reference a Secret created outside the chart. **Recommended**, e.g. with Sealed Secrets or External Secrets, so real values never go into Git or Helm values.
-  - `secret: {KEY: value}`: the chart creates the Secret (convenient for testing).
-- **Config changes roll the pods:** `checksum/config` and `checksum/secret` annotations on the pod template change whenever the values change. Kubernetes doesn't restart pods when a ConfigMap changes, so this triggers a rolling restart.
+- **ConfigMap:** `PORT`, `NODE_ENV=production` and `NODE_OPTIONS`, injected as environment variables. `PORT` is taken from the chart's `containerPort` value, so the app, the Service and the probes can never disagree about the port.
+- **No Secret:** the app doesn't read any passwords, keys or tokens, so there's nothing to put in a Secret. I didn't add an empty one just to have it. If the app ever needs one, I'd create it outside the chart (for example with Sealed Secrets or External Secrets) and load it with `envFrom`, so secret values never end up in Git.
+- **Config changes restart the pods:** Kubernetes doesn't restart pods when a ConfigMap changes, so a new value would just sit there unused. I added a checksum of the ConfigMap as an annotation on the pod. When a value changes, the checksum changes, and the Deployment rolls the pods.
 
-### Security
+### Security in the pod
 
-| Setting | Why |
-|---|---|
-| `runAsNonRoot: true`, `runAsUser: 65532` | Runs as the unprivileged `nonroot` user of the distroless image, not root |
-| `readOnlyRootFilesystem: true` | The app writes nothing, so an attacker can't drop files or modify code |
-| `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]` | No setuid tricks, no Linux capabilities |
-| `seccompProfile: RuntimeDefault` | Blocks dangerous syscalls |
-| Dedicated ServiceAccount, `automountServiceAccountToken: false` | The app never calls the Kubernetes API, so no token is mounted for an attacker to steal |
-| Ingress routes only public paths | `/classified` and `/metrics` aren't reachable from the internet |
-| Traefik security-headers Middleware | Strips `X-Powered-By` / `Server` (stack disclosure, SonarQube `javascript:S5689`) and adds `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, all at the ingress with no app code change |
-| Optional NetworkPolicy | Only the ingress controller's namespace (`kube-system`) can reach the pods |
+- The app runs as the unprivileged `nonroot` user (uid 65532) from the distroless image, never as root.
+- The root filesystem is read-only. The app doesn't write anything, so an attacker can't drop files or change the code.
+- No privilege escalation, all Linux capabilities dropped, and the default seccomp profile to block risky system calls.
+- The pod has its own ServiceAccount with no API token mounted. The app never talks to the Kubernetes API, so there's no token for an attacker to steal.
+- A Traefik Middleware removes the `X-Powered-By` and `Server` headers, which reveal the stack, and adds `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`. All of this is done at the ingress, without changing the app.
 
-### Availability and graceful shutdown
+### Staying up during updates and node failures
 
-- **`replicaCount: 2` and topology spread across nodes** (`maxSkew: 1`, soft): losing a node doesn't take the app down.
-- **PodDisruptionBudget `minAvailable: 1`:** node drains and upgrades evict pods one at a time.
-- **`preStop` sleep (5s):** Traefik and the endpoints controller stop routing to the pod *before* it exits, so in-flight requests aren't dropped.
-- **`shareProcessNamespace: true`:** Node.js has no default SIGTERM handler, and as **PID 1** the kernel ignores signals that have no handler, so pods would hang until SIGKILL at the end of the grace period. With a shared process namespace, the pause container is PID 1, and node gets SIGTERM's default action (exit) right away. This is fixed at the platform level, with no application code change. The CI smoke test does the same with `docker run --init` and checks the container stops in under 5 seconds.
-- **`revisionHistoryLimit: 5`:** enough ReplicaSets kept for quick rollbacks.
+- **Two replicas, spread across nodes,** so losing one node doesn't take the app down.
+- **A PodDisruptionBudget (`minAvailable: 1`),** so when a node is drained for maintenance, its pods are moved one at a time.
+- **A 5-second `preStop` sleep.** When a pod is shutting down, it takes a moment for Traefik to stop sending it traffic. The sleep keeps the pod alive during that moment, so requests that are already on their way don't get dropped.
+- **`shareProcessNamespace: true`.** This one took me a while to figure out. The app doesn't handle SIGTERM itself, and when a process runs as PID 1 in a container, Linux ignores signals it has no handler for. So on every shutdown, the pod just hung for the full grace period until it was force-killed. Sharing the process namespace makes the pause container PID 1 instead. Node then gets the normal SIGTERM behaviour and exits right away, again without changing the app code.
 
-### Autoscaling (optional)
-
-`autoscaling.enabled: true` creates an HPA (2–4 replicas at 70% CPU) and drops the fixed `replicas` from the Deployment, so Helm/Argo CD and the HPA don't fight over the count. It's off by default because the cluster's 2-vCPU nodes have little spare CPU to reserve. metrics-server is already installed in RKE2.
 
 ---
 
-## Steps: deploy the chart
+## The CI/CD pipeline
 
-### Prerequisites
-- `kubectl` pointing at the cluster (context `rke2-devsecops`) and Helm 3 or 4
-- The app image, which the CI/CD pipeline builds, scans, signs and pushes to `ghcr.io/elad1122/sample-nodejs:<version>`. The chart's `appVersion` (bumped by every release) is the default tag. Override it with `--set image.repository=… --set image.tag=…`
-
-### 1. Validate the chart
-```bash
-helm lint helm/sample-nodejs --strict
-
-# Render locally to review the exact manifests
-helm template sample-nodejs helm/sample-nodejs -n default
-
-# Optional: validate against the cluster's API without creating anything
-helm template sample-nodejs helm/sample-nodejs -n default | kubectl apply --dry-run=server -f -
-```
-
-### 2. Install / upgrade
-```bash
-helm upgrade --install sample-nodejs helm/sample-nodejs \
-  -n default \
-  --set image.tag=1.0.0 \
-  --wait
-```
-- `upgrade --install` works for both the first install and later upgrades.
-- `--wait` returns only when all pods pass their readiness probes.
-- The `default` namespace follows the assignment's requirement.
-
-### 3. Verify
-```bash
-kubectl -n default get deploy,pods,svc,ingress -l app.kubernetes.io/instance=sample-nodejs
-helm test sample-nodejs -n default          # in-cluster: Service -> /ready and /my-app
-
-curl http://app.34.56.31.129.nip.io/my-app     # Hello, World!
-curl http://app.34.56.31.129.nip.io/about
-curl -o /dev/null -w "%{http_code}\n" http://app.34.56.31.129.nip.io/classified   # 404, not exposed
-```
-Metrics, in-cluster only:
-```bash
-kubectl -n default port-forward svc/sample-nodejs 8080:80
-curl localhost:8080/metrics | grep root_access_total
-```
-
-### 4. Change configuration
-Edit `values.yaml`, or pass `--set`, and run step 2 again. For example:
-```bash
---set replicaCount=3
---set autoscaling.enabled=true
---set config.LOG_LEVEL=debug          # new env var; pods roll automatically (checksum annotation)
---set existingSecret=sample-nodejs-secrets
-```
-
-### 5. Roll back / uninstall
-```bash
-helm history sample-nodejs -n default
-helm rollback sample-nodejs <REVISION> -n default
-helm uninstall sample-nodejs -n default
-```
-
-## Chart validation results
+I used **GitHub Actions**, since the code already lives on GitHub. There's no CI server to run or maintain, and it connects directly to GitHub's container registry and security tab. The whole pipeline is in `.github/workflows/ci-cd.yml`. It runs on every push and pull request to `main` and `dev`, and can also be started by hand.
 
 ```
-$ helm lint helm/sample-nodejs --strict
-1 chart(s) linted, 0 chart(s) failed
-
-$ helm template ... --set autoscaling.enabled=true --set networkPolicy.enabled=true --set secret.API_KEY=x \
-    | kubectl apply --dry-run=server -f -
-networkpolicy.networking.k8s.io/sample-nodejs created (server dry run)
-poddisruptionbudget.policy/sample-nodejs created (server dry run)
-serviceaccount/sample-nodejs created (server dry run)
-secret/sample-nodejs created (server dry run)
-configmap/sample-nodejs created (server dry run)
-service/sample-nodejs created (server dry run)
-deployment.apps/sample-nodejs created (server dry run)
-horizontalpodautoscaler.autoscaling/sample-nodejs created (server dry run)
-ingress.networking.k8s.io/sample-nodejs created (server dry run)
-pod/sample-nodejs-test created (server dry run)
+push / PR ─┬─ secrets   Gitleaks                        ─┐
+           ├─ sast      SonarQube + strict quality gate  ─┤
+           ├─ sca       npm audit + Trivy (dependencies) ─┼─→ image ───────────────→ release
+           ├─ config    Hadolint + Trivy (Dockerfile,    ─┤   build                    (main only)
+           │            Helm chart)                       │   Trivy scan: HIGH = stop  bump version
+           └─ version   next version from commit messages─┘   SBOM, smoke test         tag + GitHub Release
+                                                              push + sign (main only)
 ```
 
----
+The idea is simple: **the image isn't even built until every security check has passed.** If one of them fails, everything after it is skipped. On `dev` and in pull requests the image is still built and scanned, but nothing is published.
 
-# CI/CD pipeline (DevSecOps)
+### Security checks and what makes the pipeline fail
 
-**Tool:** GitHub Actions, in [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml). It runs on every push and PR to `main` and `dev`, and can also be started manually.
-
-```
- push / PR ─┬─▶ secrets  Gitleaks (full git history)                 ─┐
-            ├─▶ sast     SonarQube + strict Quality Gate             ─┤
-            ├─▶ sca      npm audit + Trivy (dependencies)            ─┼─▶ image ──────────────────────────────▶ release
-            ├─▶ config   Hadolint + Trivy config (Dockerfile, Helm)  ─┤   build (not pushed)                    (main + feat/fix only)
-            └─▶ version  SemVer from Conventional Commits            ─┘   → Trivy image gate: HIGH/CRITICAL=STOP bump package.json + chart
-                                                                          → SBOM → smoke test                    git tag vX.Y.Z
-                                                                          → [release] push GHCR → cosign sign    GitHub Release + changelog
-```
-
-**Every security job must pass before the image is even built.** If any gate fails, nothing downstream runs. On `dev` and PRs, everything is built and scanned but **nothing is published**.
-
-## Security checks: what fails the pipeline
-
-| Job | Tool | Fails when | Why it matters |
-|---|---|---|---|
-| **Secret scan** | [Gitleaks](https://github.com/gitleaks/gitleaks) 8.30.1 (container pinned by digest), full history, `--redact` | Any credential, token or key is committed, now or in any past commit | Leaked secrets are the most common breach cause; history counts because deleted secrets are still readable in git |
-| **SAST** | **SonarQube Community 26.10** (official container) | The **Quality Gate** fails (details below) | Finds vulnerabilities, bugs and insecure patterns in the source code |
-| **SCA** (dependencies) | `npm audit --audit-level=high` + **Trivy fs** | Any **HIGH/CRITICAL** CVE in a dependency | Most app vulnerabilities come from third-party packages |
-| **Misconfiguration** | **Hadolint** (Dockerfile) + **Trivy config** (Dockerfile + rendered Helm chart) | Dockerfile bad practices (warning+), or HIGH/CRITICAL Kubernetes/Docker misconfigurations | Catches root containers, missing limits, privileged pods and so on before they ship |
-| **Image scan** | **Trivy image** on the built image | **Any HIGH or CRITICAL CVE, which blocks the push and the deployment** | The assignment's hard requirement: vulnerable images never reach the registry |
-| **Smoke test** | `docker run --read-only --cap-drop ALL --init` + curl | The app doesn't start, the probes or `/metrics` fail, it runs as root, or it takes ≥5s to stop on SIGTERM | Proves the hardened image actually works with the settings the chart uses |
-
-All Trivy results are also uploaded as **SARIF** to the repo's *Security → Code scanning* tab, so findings are tracked over time.
-
-### SAST: SonarQube in CI, with a strict gate
-- **Self-hosted:** a fresh **SonarQube Community** server starts as a *service container* in every run. No external account or long-lived secret is needed.
-  - [`sonarqube-setup.sh`](.github/scripts/sonarqube-setup.sh) **rotates the factory admin password** to a random one, creates a **per-run analysis token**, and installs the gate. Both are masked in logs and die with the job.
-- **Quality Gate `CI-Strict`, applied to *all* code:** the built-in "Sonar way" gate only checks *new* code, and on a fresh server every run is a first analysis with no baseline, so it would always pass. These conditions apply to the whole codebase instead:
-
-  | Condition | Fails when |
-  |---|---|
-  | Security issues (vulnerabilities) | > 0 |
-  | Reliability issues (bugs) | > 0 |
-  | Security hotspots reviewed | < 100% (any unreviewed hotspot) |
-  | Maintainability rating | worse than A |
-- **The gate is enforced** with `sonar.qualitygate.wait=true`, so the scanner step fails when the gate is red.
-- **Results:** [`sonarqube-report.sh`](.github/scripts/sonarqube-report.sh) publishes the gate status, metrics, issues and hotspots as **annotations on the run** and in the job summary. The server is thrown away after the job, so these are the durable record.
-
-## Version bumping (SemVer + Conventional Commits)
-
-**Commit messages decide the next version.** [`next-version.sh`](.github/scripts/next-version.sh) reads the commits since the last `vX.Y.Z` tag:
-
-| Commit message | Bump | Example |
+| Check | Tool | Fails when |
 |---|---|---|
-| `feat!: …` or `BREAKING CHANGE:` in the body | **major** | 1.4.2 → 2.0.0 |
-| `feat: …` | **minor** | 1.4.2 → 1.5.0 |
-| `fix: …` / `perf: …` | **patch** | 1.4.2 → 1.4.3 |
-| `docs:`, `chore:`, `ci:`, `test:` … | no release | — |
-| *(no tag yet)* | first release = `package.json` version | 1.0.0 |
+| Secrets | Gitleaks, over the full Git history | Any key, token or password was ever committed, even in an old commit |
+| SAST | SonarQube Community | The quality gate fails (see below) |
+| Dependencies (SCA) | `npm audit --audit-level=high` and Trivy | Any HIGH or CRITICAL vulnerability in a dependency |
+| Misconfiguration | Hadolint (Dockerfile) and Trivy config (Dockerfile + the rendered Helm chart) | Dockerfile bad practices, or HIGH/CRITICAL Kubernetes and Docker misconfigurations |
+| Image scan | Trivy, on the built image | **Any HIGH or CRITICAL vulnerability. The image isn't pushed and can't be deployed** |
+| Smoke test | `docker run` with a read-only filesystem, no capabilities, then `curl` | The app doesn't start, a health check or `/metrics` fails, it runs as root, or it takes 5 seconds or more to stop |
 
-**On `main`,** after every gate passes:
-1. The image is pushed as **`ghcr.io/elad1122/sample-nodejs:X.Y.Z`** plus `sha-<commit>`. **There is no `latest` tag**, so every tag means exactly one image.
-2. The release job bumps `package.json` and the Helm chart's `version` / `appVersion` (the chart's default image tag). It commits `chore(release): vX.Y.Z [skip ci]`, so `[skip ci]` and the `GITHUB_TOKEN` push don't start a loop.
-3. It creates an **annotated tag `vX.Y.Z`** and a **GitHub Release** with a changelog built from the commit messages, with the SBOM attached.
+Why each one is there:
 
-**Everywhere else** (dev, PRs), the version is a pre-release label such as `1.0.0-dev.g1e3502c`, used for the image labels only.
+- **History matters for secrets.** A secret deleted in a later commit can still be read from Git.
+- **Most vulnerabilities in a Node app come from dependencies**, not from the app's own code.
+- **The smoke test runs the image with the same restrictions the chart uses.** That way I know the hardened image really works before it ships.
 
-**Dependabot** ([`.github/dependabot.yml`](.github/dependabot.yml)) opens weekly PRs for npm packages, base-image digests and the pinned Actions. Its commit prefixes (`fix(deps)`, `fix(docker)`, `ci`) mean security updates turn into patch releases automatically.
+All Trivy results are also uploaded to the repo's Security → Code scanning tab, so findings can be followed over time.
 
-The logic was tested for every case: first release, docs-only (no release), fix → patch, feat → minor, breaking → major, and PRs (never release).
+### SAST with SonarQube
 
-## Building and publishing the Docker image
+I didn't want to depend on an outside account, so SonarQube runs **inside the pipeline itself**. A fresh SonarQube server starts as a service container in every run and is thrown away when the job ends.
 
-- **Builder: Docker** with its BuildKit engine (`docker/setup-buildx-action` + `docker/build-push-action`). Kaniko isn't needed: GitHub-hosted runners provide a Docker daemon, and Kaniko's main advantage is building inside a cluster without one. Layers are cached between runs (`type=gha`).
-- **Registry: GitHub Container Registry (public)**, `ghcr.io/elad1122/sample-nodejs`. It's integrated with the repo and authenticates with the run's short-lived `GITHUB_TOKEN`, so no registry password is stored. The cluster can pull the image without credentials.
-- **Order:** build locally → scan → smoke test → `docker tag` + `docker push`, only on a release from `main`.
+A brand-new SonarQube server needs a bit of preparation before it can be used, and `.github/scripts/sonarqube-setup.sh` does that:
 
-Published `1.0.0` image, as read from the registry:
+1. **It changes the default `admin/admin` password** to a random one. It's a short-lived server, but I'd rather not run anything on factory credentials.
+2. **It creates a stricter quality gate, `CI-Strict`, and makes it the default.** The built-in gate only checks *new* code. On a fresh server every run is a first analysis, with no previous one to compare against, so the built-in gate would always pass. My gate checks the whole codebase and fails if there's:
+   - any vulnerability
+   - any bug
+   - any security hotspot that hasn't been reviewed
+   - a maintainability rating worse than A
+3. **It creates a token for the scanner** that only lives as long as the run.
 
-| Property | Value |
-|---|---|
-| Platform | `linux/amd64` |
-| User | `nonroot` |
-| Entrypoint / command | `/nodejs/bin/node app.js` |
-| Port | `8080/tcp` |
-| Labels | OCI `title`, `version` (`1.0.0`), `source` (this repo), `revision` (the commit it was built from) |
+The password and the token are masked in the logs. The scanner runs with `sonar.qualitygate.wait=true`, so a failed gate fails the step.
 
-## Secure image (Dockerfile)
+**Keeping the results.** The server disappears after each run, so at the end of the job (even when the gate failed) I pull the results from its API into JSON files:
+- the quality gate status
+- the issues
+- the security hotspots
+- the main measures
 
-| Practice | How |
-|---|---|
-| Minimal runtime | **Multi-stage**: `node:24-trixie-slim` installs the dependencies, and the runtime is **`gcr.io/distroless/nodejs24-debian13:nonroot`**, with no shell, package manager or npm |
-| Reproducible | Base images **pinned by digest**; `npm ci` from the lockfile |
-| No dev or untrusted code | `npm ci --omit=dev --ignore-scripts`: no devDependencies, and no dependency install scripts run during the build |
-| Least content | Only `node_modules`, `package.json` and `app.js` are copied, not the whole repo |
-| Non-root | `USER nonroot` (uid 65532), matching the chart's `runAsUser` |
-| Current runtime | Node **24** (Active LTS); the original `node:21-alpine` reached end-of-life in 2024 |
+They're uploaded as the `sonarqube-report` artifact on the run and kept for 30 days.
 
-## Supply-chain security
+### Version bumping
 
-- **Every Action is pinned to a full commit SHA** (`uses: actions/checkout@3d3c42e… # v7.0.1`), not a movable tag. A compromised or re-tagged third-party action can't inject code, and Dependabot keeps the pins current.
-- **Least-privilege tokens:** workflow-level `permissions: contents: read`. Only the jobs that need more ask for it: `packages: write` for the GHCR push, `id-token: write` for keyless signing, `security-events: write` for SARIF, and `contents: write` for the release job only.
-- **No stored registry password:** GHCR uses the run's short-lived `GITHUB_TOKEN`.
-- **The scanned image is the pushed image:** the image is built once, loaded locally, scanned, smoke-tested, and then *that same image* is tagged and pushed. Nothing gets rebuilt after scanning.
-- **Signing and SBOM:** on release the image is **signed with cosign keyless** (Sigstore, using GitHub's OIDC identity, so there are no keys to manage), and a **CycloneDX SBOM** is attached as a signed attestation and to the GitHub Release. To verify:
+I didn't want to bump versions by hand, so **the commit messages decide the next version**, following Conventional Commits and SemVer. `.github/scripts/next-version.sh` looks at the commits since the last `vX.Y.Z` tag:
+
+| Commit message | What it does | Example |
+|---|---|---|
+| `feat!: …`, or `BREAKING CHANGE` in the body | major bump | 1.4.2 → 2.0.0 |
+| `feat: …` | minor bump | 1.4.2 → 1.5.0 |
+| `fix: …` or `perf: …` | patch bump | 1.4.2 → 1.4.3 |
+| `docs:`, `chore:`, `ci:`, `test:` … | no release | |
+| no tag yet | first release, using the version in `package.json` | 1.0.0 |
+
+When something is merged to `main` and every check passes:
+
+1. The image is pushed as `ghcr.io/elad1122/sample-nodejs:X.Y.Z` (and `sha-<commit>`). I deliberately don't push a `latest` tag, so every tag always means exactly one image.
+2. The release job updates the version in `package.json` and in the Helm chart (`version` and `appVersion`, which is the chart's default image tag). It commits that as `chore(release): vX.Y.Z [skip ci]`. The `[skip ci]` stops the commit from starting the pipeline again.
+3. It creates a `vX.Y.Z` tag and a GitHub Release, with a changelog made from the commit messages and the SBOM attached.
+
+Anywhere else (`dev`, pull requests), nothing is released. The build just gets a label like `1.0.0-dev.g1e3502c`: the version it *would* get, plus the commit.
+
+Dependabot opens weekly PRs for npm packages, the base images and the GitHub Actions. Its commits start with `fix(deps)` or `fix(docker)`, so a security update automatically becomes a patch release.
+
+### Building the image
+
+- **The order matters:** build → scan → smoke test → push. Nothing is pushed until it passed, and only on a release from `main`.
+
+The Dockerfile:
+
+- **Two stages.** `node:24-trixie-slim` installs the dependencies. The final image is `gcr.io/distroless/nodejs24-debian13:nonroot`, which has no shell, no package manager and no npm, so there's very little an attacker could use.
+- **Base images pinned by digest,** and `npm ci` installs exactly what's in the lockfile, so the same commit always builds the same image.
+- **`npm ci --omit=dev --ignore-scripts`:** no dev dependencies in the image, and no install scripts from dependencies run during the build.
+- **Only what the app needs is copied:** `node_modules`, `package.json` and `app.js`.
+- **It runs as `nonroot`** (uid 65532), the same user the chart expects.
+- **Node 24.** The original `node:21-alpine` image had reached end of life.
+
+### Supply-chain protection
+
+- **Every GitHub Action is pinned to a full commit SHA,** not a tag like `v4`. Tags can be moved, so if a third-party action were ever compromised, a tag could quietly point at bad code. Dependabot keeps the pins up to date.
+- **Minimal permissions:** the workflow only gets read access by default, and each job asks for exactly what it needs. Only the push job can write packages, only the signing step gets an OIDC token, and only the release job can write to the repo.
+- **The image I scan is the image I push.** It's built once, scanned, tested, and then that same image is tagged and pushed. Nothing is rebuilt after the scan.
+- **Signing and SBOM:** released images are signed with cosign in keyless mode, using GitHub's identity, so there are no signing keys to manage or leak. A CycloneDX SBOM is attached to the image and to the GitHub Release. To check a signature:
   ```bash
   cosign verify ghcr.io/elad1122/sample-nodejs:<version> \
     --certificate-identity-regexp 'https://github.com/elad1122/Part2-Application/.github/workflows/ci-cd.yml@.*' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com
   ```
-- **Concurrency:** a newer run cancels older runs on the same branch, except on `main`, where releases are never cancelled halfway.
+- **A new run cancels older runs on the same branch,** except on `main`, where a release is never cut off halfway.
 
-## Findings the pipeline caught, and how each was handled
+---
 
-The scope of this work is DevOps only; **application code (`app.js`) is unchanged.**
+## Deploying with Argo CD (GitOps)
 
-| # | Gate | Finding | Resolution |
-|---|---|---|---|
-| 1 | SCA | `package-lock.json`: **3 HIGH + 1 CRITICAL** (express ≤4.22.2, body-parser, path-to-regexp, proxy-addr, qs) | `npm audit fix`: lockfile updated to **express 4.22.3** and its patched dependencies. `package.json` is unchanged |
-| 2 | SCA (Trivy fs) | An unused **Dagger** CI module (`.dagger/`) with **12 vulnerable Go modules** (grpc, golang.org/x/net, OpenTelemetry) | Removed, since GitHub Actions is the pipeline. It wasn't part of the app or the image |
-| 3 | Secret scan | `sonar.projectKey=…` flagged as `generic-api-key` | **False positive** (a public identifier). Allowlisted in [`.gitleaks.toml`](.gitleaks.toml), scoped to that rule, file and key only |
-| 4 | Secret scan | `curl -u admin:admin` in an earlier version of the Sonar setup script | SonarQube's documented factory default for the throwaway container (rotated at startup). The script no longer writes it literally, and the allowlist is scoped to that single past commit and rule |
-| 5 | **SAST** | **`javascript:S5689` VULNERABILITY:** Express discloses its version through the `X-Powered-By` header. **The Quality Gate failed and blocked the pipeline** | **Mitigated at the platform:** the Helm chart's Traefik Middleware strips `X-Powered-By` and `Server` and adds security headers. The rule is marked accepted for `app.js` in [`sonar-project.properties`](sonar-project.properties) with that reason, so any other finding still fails the gate. The proper long-term fix is one line in the app, `app.disable('x-powered-by')`, for the dev team |
-| 6 | Image | Base `node:21-alpine` (end-of-life) | Replaced by distroless Node 24. Trivy finds **0 HIGH/CRITICAL** in the new image |
+The Argo CD `AppProject` and `Application` live in a separate repo, [Part3-GitOps](https://github.com/elad1122/Part3-GitOps), whose README explains that choice. The Helm chart and its `values.yaml` stay here, next to the code.
 
-## Evidence: real pipeline runs
+The Application follows the newest `vX.Y.Z` tag of this repo. The release job only creates that tag after every check and the image push have succeeded, so a build that failed a check can never reach the cluster.
 
-| Run | What it shows |
-|---|---|
-| [#7](https://github.com/elad1122/Part2-Application/actions/runs/40954665353) | **SAST gate blocks:** SonarQube found S5689 (`vulnerabilities=1`), *Quality Gate ERROR*, the image job was skipped |
-| [#9](https://github.com/elad1122/Part2-Application/actions/runs/40955687107) | **All green with the original `app.js`:** every gate passed, *Quality Gate OK*, the image built, Trivy found 0 HIGH/CRITICAL, the smoke test passed, nothing published (dev) |
-| [#10](https://github.com/elad1122/Part2-Application/actions/runs/40956224642) | **Trivy gate blocks deployment:** a demo commit used the old `node:21-alpine` base. The *Trivy image gate* failed, and SBOM, smoke test, push and signing were all **skipped**. The demo commit was reverted right after |
+**The pipeline never touches the cluster and has no cluster credentials at all.** It creates a tag, and Argo CD notices it and syncs within about 3 minutes.
 
-## Deployment (GitOps with Argo CD)
+## Day-to-day use
 
-The Argo CD `AppProject` and `Application` live in a **separate infra repo, [Part3-GitOps](https://github.com/elad1122/Part3-GitOps)**. Its README explains why. The Helm chart and its single `values.yaml` stay in this repo.
+- Work on `dev` and open a pull request to `main`. Every push and every PR runs all the checks.
+- To release, merge to `main` with at least one `feat:` or `fix:` commit. The pipeline takes care of the rest: version, image, signature, tag and release.
+- I'd also protect `main` so a PR can't be merged unless the pipeline passed. If you do that, allow `github-actions[bot]` to push the release commit, or switch the release step to open a PR instead.
 
-The Application follows the newest `vX.Y.Z` tag of this repo. The release job creates that tag only after every gate and the image push have passed, so a blocked build can't reach the cluster. **The pipeline never talks to the cluster and holds no cluster or deploy credentials:** it creates the tag, and Argo CD syncs within about 3 minutes.
 
-## How to use it
-
-- **Day-to-day:** work on `dev` and open a PR to `main`. Every push and PR runs all the gates.
-- **Release:** merge to `main` with at least one `feat:` / `fix:` commit. The pipeline publishes, signs, bumps the version, tags and releases.
-- **Pulling the image:** the GHCR package `sample-nodejs` is public, so the cluster needs no pull secret. If it's ever made private, create an image-pull Secret and set `imagePullSecrets` in the chart.
-- **Recommended repo settings:** branch protection on `main` that requires the CI/CD checks to pass, so a PR can't be merged past a failed gate. If you enable it, allow `github-actions[bot]` to push the release commit, or change the release step to open a PR instead.
-
-### Reproduce the checks locally
-```bash
-npm ci --ignore-scripts && npm audit --omit=dev --audit-level=high
-docker build -t sample-nodejs:local .
-docker run --rm aquasec/trivy image --severity HIGH,CRITICAL --exit-code 1 sample-nodejs:local
-docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact
-docker run --rm -i hadolint/hadolint < Dockerfile
-```

@@ -1,15 +1,3 @@
-# CI/CD for sample-nodejs – DevSecOps pipeline
-#
-#  secrets ─┐
-#  sast    ─┤
-#  sca     ─┼─▶ image (build → Trivy gate → smoke test → [main] push + sign + SBOM) ─▶ [main] release
-#  config  ─┤
-#  version ─┘
-#
-# Deployment: Argo CD follows the newest vX.Y.Z tag, which only the release job creates.
-#
-# Every security job must pass before the image is built. On PRs and dev nothing is published.
-# On main: SemVer from Conventional Commits, image pushed to GHCR, signed, chart bumped, GitHub Release.
 
 name: CI/CD
 
@@ -20,13 +8,12 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
-# Least privilege: read-only by default; jobs request only what they need
+
 permissions:
   contents: read
 
 concurrency:
   group: ci-cd-${{ github.ref }}
-  # Never cancel a release in progress on main
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -34,16 +21,14 @@ env:
   NODE_VERSION: "24"
 
 jobs:
-  # ---------------------------------------------------------------------------
+
   secrets:
     name: Secret scan (Gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0            # scan the whole history, not just the last commit
-      # Official Gitleaks image pinned by digest. --redact keeps secret values out of logs/reports;
-      # each finding is surfaced as an annotation (file, line, rule) on the run.
+          fetch-depth: 0
       - name: Gitleaks (full history, redacted)
         run: |
           set +e
@@ -58,12 +43,10 @@ jobs:
           fi
           exit $rc
 
-  # ---------------------------------------------------------------------------
   sast:
     name: SAST (SonarQube)
     runs-on: ubuntu-latest
-    # Self-hosted SonarQube Community, started fresh for every run: no external account or
-    # stored secret; credentials are generated per run and die with the job.
+
     services:
       sonarqube:
         image: sonarqube:26.10.0.133078-community@sha256:aa0d41212704d1ed35f7ae3b49886b39f639590baf8020cdb191c2a2eb8f9eae
@@ -74,15 +57,14 @@ jobs:
       SONAR_HOST_URL: http://localhost:9000
       SONAR_PROJECT_KEY: sample-nodejs
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0            # full history for blame / SCM data
+          fetch-depth: 0
       - name: Prepare SonarQube (rotate admin password, strict Quality Gate, token)
         run: bash .github/scripts/sonarqube-setup.sh
       - name: SonarQube scan + wait for Quality Gate
-        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304
         with:
-          # Fails this step (and the pipeline) when the Quality Gate fails
           args: >
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300
@@ -90,16 +72,15 @@ jobs:
         if: always() && env.SONAR_ADMIN_PW != ''
         run: bash .github/scripts/sonarqube-report.sh
 
-  # ---------------------------------------------------------------------------
   sca:
     name: Dependency scan (npm audit + Trivy)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write        # upload SARIF to the Security tab
+      security-events: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -108,7 +89,7 @@ jobs:
       - name: npm audit (fail on HIGH/CRITICAL in production deps)
         run: npm audit --omit=dev --audit-level=high
       - name: Trivy filesystem scan (SARIF report)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           scan-ref: .
@@ -116,13 +97,13 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0"
-      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce37
         if: always() && hashFiles('trivy-fs.sarif') != ''
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-dependencies
       - name: Trivy filesystem gate (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           scan-ref: .
@@ -132,7 +113,7 @@ jobs:
           exit-code: "1"
           skip-setup-trivy: true
 
-  # ---------------------------------------------------------------------------
+
   config:
     name: Misconfiguration (Hadolint + Trivy config)
     runs-on: ubuntu-latest
@@ -140,27 +121,27 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Hadolint (Dockerfile best practices)
-        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387
         with:
           dockerfile: Dockerfile
           failure-threshold: warning
       - name: Trivy config scan – Dockerfile + Helm chart (SARIF report)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: config
           scan-ref: .
           format: sarif
           output: trivy-config.sarif
           exit-code: "0"
-      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
         if: always() && hashFiles('trivy-config.sarif') != ''
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config
       - name: Trivy config gate (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: config
           scan-ref: .
@@ -169,7 +150,7 @@ jobs:
           exit-code: "1"
           skip-setup-trivy: true
 
-  # ---------------------------------------------------------------------------
+
   version:
     name: Compute version (SemVer from Conventional Commits)
     runs-on: ubuntu-latest
@@ -178,33 +159,31 @@ jobs:
       release: ${{ steps.next.outputs.release }}
       previous: ${{ steps.next.outputs.previous }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0            # needs all tags and commits
+          fetch-depth: 0            
       - id: next
         run: bash .github/scripts/next-version.sh
 
-  # ---------------------------------------------------------------------------
   image:
     name: Build, scan and publish image
     needs: [secrets, sast, sca, config, version]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write               # push to GHCR with GITHUB_TOKEN (no stored registry password)
-      id-token: write               # OIDC identity for keyless cosign signing
+      packages: write
+      id-token: write
       security-events: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      # Publish only when the version job decided this is a release (push to main + feat/fix commits)
       IS_RELEASE: ${{ needs.version.outputs.release }}
       LOCAL_TAG: sample-nodejs:ci
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
 
       - name: Build image (loaded locally, NOT pushed yet)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           load: true
@@ -219,23 +198,22 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
       - name: Trivy image scan (SARIF report)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: image
           image-ref: ${{ env.LOCAL_TAG }}
           format: sarif
           output: trivy-image.sarif
           exit-code: "0"
-      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370
         if: always() && hashFiles('trivy-image.sarif') != ''
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
 
-      # THE deployment gate: any HIGH/CRITICAL CVE stops the job here, so nothing below runs
-      # (no push, no signature, no release, no deployment).
+    
       - name: Trivy image gate – block on HIGH/CRITICAL
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: image
           image-ref: ${{ env.LOCAL_TAG }}
@@ -245,22 +223,21 @@ jobs:
           skip-setup-trivy: true
 
       - name: SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: image
           image-ref: ${{ env.LOCAL_TAG }}
           format: cyclonedx
           output: sbom.cdx.json
           skip-setup-trivy: true
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: sbom
           path: sbom.cdx.json
 
       - name: Smoke test (hardened runtime, probes, graceful shutdown)
         run: |
-          # --init: a tiny init is PID 1 (like shareProcessNamespace in the Helm chart), so node,
-          # which has no SIGTERM handler, still exits promptly on SIGTERM
+         
           docker run -d --init --name smoke --read-only --cap-drop ALL \
             --security-opt no-new-privileges -p 8080:8080 "$LOCAL_TAG"
           for i in $(seq 1 30); do curl -sf localhost:8080/ready && break; sleep 1; done
@@ -268,16 +245,15 @@ jobs:
           test "$(curl -fsS localhost:8080/my-app)" = "Hello, World!"
           curl -fsS localhost:8080/metrics | grep -q '^root_access_total 1'
           test "$(docker inspect -f '{{.Config.User}}' smoke)" = "nonroot"
-          # SIGTERM must stop the app quickly (not hang until the 10s kill timeout)
           start=$(date +%s); docker stop -t 10 smoke; took=$(( $(date +%s) - start ))
           docker logs smoke
           echo "stopped in ${took}s, exit code $(docker inspect -f '{{.State.ExitCode}}' smoke)"
           test "$took" -lt 5
 
-      # ---------------- main only: publish ----------------
+
       - name: Log in to GHCR
         if: env.IS_RELEASE == 'true'
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -296,7 +272,7 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Pushed $IMAGE:$VERSION ($DIGEST)" >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         if: env.IS_RELEASE == 'true'
       - name: Sign image + attach SBOM attestation (keyless, OIDC)
         if: env.IS_RELEASE == 'true'
@@ -306,28 +282,27 @@ jobs:
           cosign sign --yes "$REF"
           cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$REF"
 
-  # ---------------------------------------------------------------------------
+
   release:
     name: Release (bump versions, tag, GitHub Release)
     needs: [image, version]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write               # commit the version bump, push the tag, create the release
+      contents: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
       PREVIOUS: ${{ needs.version.outputs.previous }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: sbom
       - name: Bump package.json and Helm chart
         run: |
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-          # Chart version and appVersion track the release; appVersion is the default image tag
           sed -i -E "s/^version: .*/version: $VERSION/; s/^appVersion: .*/appVersion: \"$VERSION\"/" helm/sample-nodejs/Chart.yaml
           git diff
       - name: Commit, tag and push

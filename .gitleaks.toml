@@ -1,4 +1,4 @@
-# Gitleaks config: default rules + narrowly scoped false-positive allowlist.
+
 [extend]
 useDefault = true
 

@@ -5,9 +5,7 @@ metadata:
   labels:
     {{- include "sample-nodejs.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
-  {{- end }}
   revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   strategy:
     {{- toYaml .Values.strategy | nindent 4 }}
@@ -17,9 +15,7 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the pods when config or secret values change
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- if .Values.metrics.scrapeAnnotations }}
         prometheus.io/scrape: "true"
         prometheus.io/path: {{ .Values.metrics.path | quote }}
